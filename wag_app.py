@@ -108,6 +108,8 @@ st.markdown(
 
 # ---------- API Key (Perplexity only) ----------
 PERPLEXITY_API_KEY = st.secrets["PERPLEXITY_API_KEY"]
+WORLDTIDES_API_KEY = st.secrets["WORLDTIDES_API_KEY"]
+OPENWEATHERMAP_API_KEY = st.secrets["OPENWEATHERMAP_API_KEY"]
 
 # ---------- Perplexity (Sonar) Call ----------
 def call_sonar_for_walk(user_input: str) -> str:
