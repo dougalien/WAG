@@ -1,578 +1,449 @@
-import os
-import base64
-import mimetypes
-from io import BytesIO
-from datetime import datetime
-
+import datetime
+import math
 import requests
 import streamlit as st
-from dotenv import load_dotenv
-from PIL import Image
 
-load_dotenv()
-
-API_URL = "https://api.perplexity.ai/chat/completions"
-DEFAULT_MODEL = "sonar-pro"
-
-
-def init_state():
-    defaults = {
-        "started": False,
-        "image_name": None,
-        "image_bytes": None,
-        "image_mime": None,
-        "image_data_uri": None,
-        "display_messages": [],
-        "api_history": [],
-        "mode": "Auto",
-        "context_notes": "",
-        "specimen_label": "",
-        "model": DEFAULT_MODEL,
-        "last_uploaded_signature": None,
-        # Tutoring flow
-        "student_observations": "",
-        "student_best_answer": "",
-        "known_name": "",
-        "student_name": "",
-        # Zoom options
-        "include_auto_zoom": False,
-        "zoom_fraction": 0.5,
-        # auth flag no longer used, but kept for safety
-        "authenticated": True,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# login_screen kept but unused; you can delete it if you want
-def login_screen():
-    st.title("🪨 GIA: guided image analysis")
-    st.caption("Instructor pilot: enter the access password to use this app.")
-
-    pw = st.text_input("Access password", type="password")
-
-    if pw:
-        correct_pw = os.getenv("APP_PASSWORD", "").strip()
-        if not correct_pw:
-            st.error("APP_PASSWORD is not set in your .env file.")
-        elif pw == correct_pw:
-            st.session_state.authenticated = True
-            st.success("Logged in. Loading the app...")
-            st.rerun()
-        else:
-            st.error("Incorrect password. Please check with your instructor.")
-
-
-def reset_app():
-    keep_model = st.session_state.get("model", DEFAULT_MODEL)
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    init_state()
-    st.session_state.model = keep_model
-
-
-def get_api_key():
-    return os.getenv("PERPLEXITY_API_KEY")
-
-
-def file_to_data_uri(uploaded_file):
-    raw = uploaded_file.getvalue()
-    mime = uploaded_file.type
-    if not mime:
-        mime = mimetypes.guess_type(uploaded_file.name)[0] or "image/png"
-    b64 = base64.b64encode(raw).decode("utf-8")
-    data_uri = f"data:{mime};base64,{b64}"
-    return raw, mime, data_uri
-
-
-def update_uploaded_image(uploaded_file):
-    if uploaded_file is None:
-        return
-
-    signature = (uploaded_file.name, uploaded_file.size)
-    if st.session_state.last_uploaded_signature == signature:
-        return
-
-    raw, mime, data_uri = file_to_data_uri(uploaded_file)
-    st.session_state.image_name = uploaded_file.name
-    st.session_state.image_bytes = raw
-    st.session_state.image_mime = mime
-    st.session_state.image_data_uri = data_uri
-    st.session_state.last_uploaded_signature = signature
-
-
-def get_image_contents_for_api():
-    """
-    Returns a list of image content dicts for the API:
-    - Always includes the full image.
-    - Optionally includes a zoomed center crop if enabled.
-    """
-    if not st.session_state.image_bytes or not st.session_state.image_data_uri:
-        return []
-
-    contents = [
-        {
-            "type": "image_url",
-            "image_url": {"url": st.session_state.image_data_uri},
-        }
-    ]
-
-    if not st.session_state.include_auto_zoom:
-        return contents
-
-    try:
-        img = Image.open(BytesIO(st.session_state.image_bytes))
-        w, h = img.size
-        frac = st.session_state.zoom_fraction
-        frac = max(0.1, min(frac, 1.0))
-
-        cw, ch = int(w * frac), int(h * frac)
-        left = (w - cw) // 2
-        top = (h - ch) // 2
-        right = left + cw
-        bottom = top + ch
-        crop_center = img.crop((left, top, right, bottom))
-
-        buf = BytesIO()
-        fmt = img.format if img.format in ["JPEG", "PNG", "WEBP"] else "PNG"
-        crop_center.save(buf, format=fmt)
-        crop_bytes = buf.getvalue()
-        b64 = base64.b64encode(crop_bytes).decode("utf-8")
-        mime = {
-            "JPEG": "image/jpeg",
-            "JPG": "image/jpeg",
-            "PNG": "image/png",
-            "WEBP": "image/webp",
-        }.get(fmt, "image/png")
-        crop_data_uri = f"data:{mime};base64,{b64}"
-
-        contents.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": crop_data_uri},
-            }
-        )
-    except Exception:
-        pass
-
-    return contents
-
-
-def build_system_prompt(mode):
-    mode_guidance = {
-        "Auto": """
-Decide which domain best fits the specimen: rock, mineral, fossil, sand/granular sediment, soil, or forensic particulate.
-If the domain is unclear, say so explicitly and explain what visible evidence would help.
-""",
-        "Rock": """
-Focus on rock identification. Prioritize texture, grain size, clast vs crystalline texture, sorting, rounding, layering, vesicles, foliation, cement, and matrix.
-Avoid overclaiming composition when the image does not support it.
-""",
-        "Mineral": """
-Focus on mineral identification. Prioritize color, luster, transparency, habit, cleavage/fracture clues, crystal form, and likely hardness implications if visible.
-Avoid claiming a mineral species unless the image evidence is strong.
-""",
-        "Fossil": """
-Focus on fossil identification. Prioritize symmetry, segmentation, ornamentation, shell geometry, visible structures, preservation style, and likely fossil group.
-Avoid forcing a genus/species ID from weak evidence.
-""",
-        "Sand/Granular": """
-Focus on sand, grains, sediment, soil particles, or particulate forensic-style material.
-Comment when possible on grain size class, sorting, roundness/angularity, sphericity, transparency/opacity, luster, quartz likelihood, feldspar clues, lithic fragments, heavy minerals, organic fragments, and what cannot be determined from this image alone.
-Do not call it a powder or crystal substance unless the image clearly supports that language.
-""",
-        "Forensic": """
-Focus on trace material or forensic-style particulate evidence.
-Describe visible particle classes, shape variation, color variation, transparency, possible natural vs manufactured particles, contamination risk, and what follow-up observations are needed before any strong claim.
-Be especially conservative.
-""",
-    }
-
-    return f"""
-You are a conversational geology tutor for an introductory college teaching app in 2026.
-
-General rules:
-- Sound like a patient lab instructor, not a script. Vary your wording and examples.
-- Distinguish direct observation from interpretation and keep observations honest, even if they do not fully support the instructor's known name.
-- Be useful, specific, cautious, and friendly.
-- Do not overclaim. Admit uncertainty and change your mind if new information appears.
-- When discussing geology, focus on the actual descriptive features students should observe.
-- Teach the student how to look, not just what to conclude.
-- If the evidence is weak, offer a small number of plausible interpretations and explain why.
-- Keep responses compact (about 4–8 sentences) and clearly tied to THIS particular image and chat turn.
-- Whenever it helps, explicitly connect your explanation to what the student just said.
-- Avoid repeating the same examples or sentence openings you used earlier in this conversation.
-- Use the full image for overall context and scale, and any zoomed image(s) to inspect fine details like textures, grain boundaries, cleavage, or fossils.
-- If the student asks for a summary or evaluation, provide it in a friendly, concise way that validates what they did well and gives specific next steps.
-
-Response style:
-- Answer in 1–2 natural-sounding paragraphs.
-- Finish with exactly one short, open-ended question to keep the conversation going (unless the student explicitly asks for a summary or says they are done).
-
-Domain instructions:
-{mode_guidance.get(mode, mode_guidance["Auto"])}
-""".strip()
-
-
-def build_api_messages():
-    messages = [{"role": "system", "content": build_system_prompt(st.session_state.mode)}]
-
-    for item in st.session_state.api_history:
-        if item["role"] == "user":
-            content = [{"type": "text", "text": item["content"]}]
-            images = get_image_contents_for_api()
-            content.extend(images)
-            messages.append({"role": "user", "content": content})
-        else:
-            messages.append({"role": "assistant", "content": item["content"]})
-
-    return messages
-
-
-def call_perplexity(messages=None):
-    api_key = get_api_key()
-    if not api_key:
-        raise RuntimeError(
-            "Missing PERPLEXITY_API_KEY in your environment."
-        )
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    if messages is None:
-        messages = build_api_messages()
-
-    payload = {
-        "model": st.session_state.model,
-        "messages": messages,
-    }
-
-    response = requests.post(API_URL, headers=headers, json=payload, timeout=180)
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Perplexity error {response.status_code}: {response.text[:2000]}"
-        )
-
-    data = response.json()
-    return data["choices"][0]["message"]["content"].strip()
-
-
-def start_first_analysis():
-    if not st.session_state.image_data_uri:
-        raise RuntimeError("Please upload an image first.")
-
-    label = st.session_state.specimen_label.strip() or "No specimen label provided"
-    notes = st.session_state.context_notes.strip() or "No additional notes provided"
-    student_name = st.session_state.student_name.strip() or "[no name provided]"
-    observations = st.session_state.student_observations.strip() or "[none entered yet]"
-    best_answer = st.session_state.student_best_answer.strip() or "[none entered yet]"
-    known_name = st.session_state.known_name.strip() or "[none provided]"
-
-    starter_prompt = f"""
-Please analyze the uploaded specimen image for a teaching app.
-
-Selected mode: {st.session_state.mode}
-Specimen label: {label}
-Student/instructor notes: {notes}
-Student name (if given, use occasionally in a natural, non-repetitive way): {student_name}
-Student observations so far: {observations}
-Student best answer so far: {best_answer}
-Known name from instructor (if any): {known_name}
-
-Your job:
-- Start with observation before interpretation.
-- If this is sand or granular material, explicitly address whether the visible grains appear well sorted or poorly sorted, whether quartz is likely, whether lithic grains may be present, and what cannot be determined confidently.
-- If the evidence does not support a strong ID, say so clearly.
-- Sound conversational and non-repetitive, as if you are talking with the student at the lab bench.
-- Use the full image for scale and any zoomed image(s) to inspect textures and fine details.
-- End with exactly one open-ended question that invites the student to make or refine an observation.
-""".strip()
-
-    visible_user_text = (
-        f"Please analyze this uploaded specimen.\n\n"
-        f"Mode: {st.session_state.mode}\n"
-        f"Label: {label}\n"
-        f"Notes: {notes}"
-    )
-
-    st.session_state.api_history = [{"role": "user", "content": starter_prompt}]
-    st.session_state.display_messages = [
-        {"role": "user", "content": visible_user_text}
-    ]
-
-    reply = call_perplexity()
-
-    st.session_state.api_history.append({"role": "assistant", "content": reply})
-    st.session_state.display_messages.append({"role": "assistant", "content": reply})
-    st.session_state.started = True
-
-
-def send_followup(user_text):
-    user_text = user_text.strip()
-    if not user_text:
-        return
-
-    student_name = st.session_state.student_name.strip() or "[no name provided]"
-    observations = st.session_state.student_observations.strip() or "[none entered yet]"
-    best_answer = st.session_state.student_best_answer.strip() or "[none entered yet]"
-    known_name = st.session_state.known_name.strip() or "[none provided]"
-
-    followup_prompt = f"""
-Student follow-up:
-{user_text}
-
-Context:
-- Student name (if usable, mention naturally at most once per reply): {student_name}
-- Mode: {st.session_state.mode}
-- Specimen label: {st.session_state.specimen_label or "[none]"}
-- Student observations: {observations}
-- Student best answer: {best_answer}
-- Known name from instructor: {known_name}
-- Your earlier messages might include a guess that could be wrong.
-
-Please answer as a conversational geology tutor.
-Stay grounded in the uploaded image and the student's words.
-If the student provides new observations or corrections, incorporate them honestly.
-If the new information or known name conflicts with your earlier idea, politely explain the mismatch and keep your observations honest to the image.
-Be concise (about 4–8 sentences), supportive, and vary your phrasing so it does not sound like a template.
-When helpful, refer the student to specific parts of the main image or the zoomed view (e.g., "look closely at the zoomed image where the grains touch").
-If the student asks for a summary or evaluation, provide it without a follow-up question.
-Otherwise, end with exactly one open-ended question that nudges the student toward a next observation or comparison.
-""".strip()
-
-    st.session_state.display_messages.append({"role": "user", "content": user_text})
-    st.session_state.api_history.append({"role": "user", "content": followup_prompt})
-
-    reply = call_perplexity()
-
-    st.session_state.api_history.append({"role": "assistant", "content": reply})
-    st.session_state.display_messages.append({"role": "assistant", "content": reply})
-
-
-def save_conversation_to_file():
-    """
-    Exports the conversation to a plain text file with timestamp.
-    """
-    if not st.session_state.display_messages:
-        return None
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    student_name = st.session_state.student_name.strip() or "student"
-    safe_name = "".join(c if c.isalnum() else "_" for c in student_name)
-    filename = f"QIA_conversation_{safe_name}_{timestamp}.txt"
-
-    lines = []
-    lines.append("=" * 60)
-    lines.append("QIA: Guided Image Analysis - Conversation Log")
-    lines.append("=" * 60)
-    lines.append(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"Student: {st.session_state.student_name or '[not provided]'}")
-    lines.append(f"Specimen label: {st.session_state.specimen_label or '[none]'}")
-    lines.append(f"Mode: {st.session_state.mode}")
-    lines.append(f"Known name: {st.session_state.known_name or '[none]'}")
-    lines.append("=" * 60)
-    lines.append("")
-
-    for msg in st.session_state.display_messages:
-        role = "STUDENT" if msg["role"] == "user" else "AI TUTOR"
-        lines.append(f"[{role}]")
-        lines.append(msg["content"])
-        lines.append("")
-
-    lines.append("=" * 60)
-    lines.append("End of conversation")
-    lines.append("=" * 60)
-
-    content = "\n".join(lines)
-    return filename, content
-
-
-# ---------- Streamlit UI ----------
-
-st.set_page_config(page_title="We Are Dougalien", page_icon="🪨", layout="wide")
-init_state()
-
-# LOGIN GATE REMOVED: app always loads
-
-st.title("🪨 GIA: guided image analysis")
-st.caption(
-    "Upload a specimen image, start the analysis, then chat with the AI tutor to refine your interpretation."
+# ---------- Page & Theme ----------
+st.set_page_config(
+    page_title="WAG: Walks Are Good",
+    page_icon="🐾",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
-with st.sidebar:
-    st.subheader("Settings")
-    st.session_state.model = st.text_input(
-        "Perplexity model", value=st.session_state.model
-    )
-    st.session_state.mode = st.selectbox(
-        "Specimen mode",
-        ["Auto", "Rock", "Mineral", "Fossil", "Sand/Granular", "Forensic"],
-        index=[
-            "Auto",
-            "Rock",
-            "Mineral",
-            "Fossil",
-            "Sand/Granular",
-            "Forensic",
-        ].index(st.session_state.mode)
-        if st.session_state.mode
-        in ["Auto", "Rock", "Mineral", "Fossil", "Sand/Granular", "Forensic"]
-        else 0,
-    )
-    st.session_state.specimen_label = st.text_input(
-        "Specimen label / sample ID",
-        value=st.session_state.specimen_label,
-        placeholder="e.g., Beach sand sample A",
-    )
-    st.session_state.context_notes = st.text_area(
-        "Context notes",
-        value=st.session_state.context_notes,
-        height=120,
-        placeholder=(
-            "e.g., beach sample, hand lens view, no scale bar, bright overhead light"
-        ),
-    )
-    st.session_state.student_name = st.text_input(
-        "Your name (optional, for the tutor)",
-        value=st.session_state.student_name,
-        placeholder="e.g., Alex",
-    )
+st.markdown(
+    """
+    <style>
+    :root {
+        --wag-bg: #FFF8E7;
+        --wag-primary: #1F7A8C;
+        --wag-secondary: #F4A259;
+        --wag-accent: #254441;
+        --wag-text: #1F2421;
+        --wag-muted: #5C6B73;
+    }
 
-    st.markdown("---")
-    st.subheader("Image zoom options")
+    .main {
+        background-color: var(--wag-bg);
+    }
 
-    st.session_state.include_auto_zoom = st.checkbox(
-        "Include a center zoom image for the AI",
-        value=st.session_state.include_auto_zoom,
-        help="Sends a zoomed-in crop along with the full image so the AI can inspect textures more closely.",
+    .wag-title {
+        text-align: center;
+        padding-top: 0.5rem;
+        padding-bottom: 0.25rem;
+        color: var(--wag-accent);
+        font-family: "Trebuchet MS", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .wag-subtitle {
+        text-align: center;
+        color: var(--wag-muted);
+        font-size: 0.95rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .wag-separator {
+        text-align: center;
+        color: var(--wag-secondary);
+        font-size: 1.3rem;
+        margin: 0.5rem 0 1.0rem 0;
+    }
+
+    .wag-card {
+        background-color: #FFFFFF;
+        border-radius: 14px;
+        padding: 1.1rem 1.3rem;
+        margin-top: 1.2rem;
+        border: 1px solid rgba(31, 122, 140, 0.08);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+    }
+
+    .wag-card h3 {
+        margin-top: 0;
+        color: var(--wag-primary);
+        font-family: "Trebuchet MS", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .wag-body-text {
+        color: var(--wag-text);
+        font-size: 0.95rem;
+        line-height: 1.5;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    table.wag-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+        margin-top: 0.5rem;
+    }
+
+    table.wag-table th,
+    table.wag-table td {
+        border: 1px solid rgba(37, 68, 65, 0.15);
+        padding: 0.35rem 0.4rem;
+        text-align: center;
+    }
+
+    table.wag-table th {
+        background-color: rgba(31, 122, 140, 0.12);
+        color: var(--wag-accent);
+    }
+
+    table.wag-table tr:nth-child(even) {
+        background-color: rgba(255, 248, 231, 0.7);
+    }
+
+    table.wag-table tr:nth-child(odd) {
+        background-color: #FFFFFF;
+    }
+
+    div.stButton > button:first-child {
+        background: linear-gradient(135deg, var(--wag-primary), var(--wag-secondary));
+        color: white;
+        border: none;
+        border-radius: 999px;
+        padding: 0.6rem 1.6rem;
+        font-size: 1.05rem;
+        font-weight: 600;
+        font-family: "Trebuchet MS", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+        cursor: pointer;
+        transition: transform 0.05s ease-in-out, box-shadow 0.05s ease-in-out, filter 0.05s ease-in-out;
+    }
+
+    div.stButton > button:first-child:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.03);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.20);
+    }
+
+    div.stButton > button:first-child:active {
+        transform: translateY(0px);
+        box-shadow: 0 3px 7px rgba(0, 0, 0, 0.18);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---------- API Keys from Streamlit secrets ----------
+PERPLEXITY_API_KEY = st.secrets["PERPLEXITY_API_KEY"]
+WORLDTIDES_API_KEY = st.secrets["WORLDTIDES_API_KEY"]
+
+# ---------- Fixed Locations ----------
+BOSTON_LAT = 42.35
+BOSTON_LON = -71.05  # Boston Harbor
+
+
+# ---------- Time helpers ----------
+def get_today_range():
+    now = datetime.datetime.now()
+    start = datetime.datetime(now.year, now.month, now.day, 0, 0, 0)
+    end = start + datetime.timedelta(days=1)
+    return start, end
+
+
+# ---------- WorldTides (real tides) ----------
+def get_tides_boston():
+    start, end = get_today_range()
+    start_ts = int(start.timestamp())
+    end_ts = int(end.timestamp())
+    url = (
+        "https://www.worldtides.info/api/v3"
+        f"?extremes&lat={BOSTON_LAT}&lon={BOSTON_LON}"
+        f"&start={start_ts}&end={end_ts}&key={WORLDTIDES_API_KEY}"
     )
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    extremes = data.get("extremes", [])
+    tides = []
+    for ex in extremes:
+        ts = datetime.datetime.fromtimestamp(ex["dt"])
+        tides.append(
+            {
+                "time": ts,
+                "type": ex.get("type", ""),
+                "height": ex.get("height"),
+            }
+        )
+    return tides
 
-    st.session_state.zoom_fraction = st.slider(
-        "Zoom size (fraction of image)",
-        min_value=0.2,
-        max_value=0.8,
-        value=float(st.session_state.zoom_fraction),
-        step=0.1,
-        help="Controls how large the center crop is relative to the full image.",
-    )
 
-    st.markdown("---")
+def tide_state_for_time(tides, t, window_hours=1.5):
+    if not tides:
+        return "Unknown"
+    closest = min(tides, key=lambda ex: abs((ex["time"] - t).total_seconds()))
+    diff_hours = abs((closest["time"] - t).total_seconds()) / 3600.0
+    if diff_hours <= window_hours:
+        if "High" in closest["type"]:
+            return "High tide"
+        if "Low" in closest["type"]:
+            return "Low tide"
+    return "Mid tide"
 
-    if st.button("Reset app", use_container_width=True):
-        reset_app()
-        st.rerun()
 
-left, right = st.columns([1, 1.2])
+# ---------- Approximate weather model ----------
+def approximate_weather_for_hour(t: datetime.datetime):
+    hour = t.hour
+    center = 15  # warmest ~3 PM
+    span = 12
+    diff = (hour - center) / span
+    temp = 40 + 10 * math.cos(diff * math.pi)  # 40±10°F
 
-with left:
-    uploaded_file = st.file_uploader(
-        "Upload specimen image",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=False,
-    )
+    if 16 <= hour <= 19:
+        if datetime.datetime.now().day % 2 == 0:
+            conditions = "Light rain"
+            raining = True
+        else:
+            conditions = "Mostly cloudy"
+            raining = False
+    else:
+        if 10 <= hour <= 15:
+            conditions = "Partly cloudy"
+        elif hour < 10:
+            conditions = "Mostly cloudy"
+        else:
+            conditions = "Clear"
+        raining = False
 
-    if uploaded_file is not None:
-        update_uploaded_image(uploaded_file)
-        st.image(
-            st.session_state.image_bytes,
-            caption=st.session_state.image_name,
-            use_container_width=True,
+    return round(temp), conditions, raining
+
+
+# ---------- Sunlight ----------
+def estimate_sunset():
+    now = datetime.datetime.now()
+    return datetime.datetime(now.year, now.month, now.day, 18, 45, 0)  # ~6:45 PM
+
+
+def is_dark(hour_dt, sunset_dt):
+    return hour_dt > sunset_dt
+
+
+# ---------- Walk rules ----------
+def classify_walk(temp_f, is_raining, tide_state, dark):
+    if is_raining:
+        return "Stay Home"
+
+    if temp_f <= 32:
+        return "Forest Walk" if not dark else "Golf Course Walk"
+    elif 32 < temp_f <= 60:
+        return "Forest Walk" if not dark else "Golf Course Walk"
+    else:
+        if "High" in tide_state:
+            return "Swim Walk"
+        elif "Low" in tide_state:
+            return "Forest Walk"
+        else:
+            return "Forest Walk"
+
+
+# ---------- Perplexity summary ----------
+def summarize_with_perplexity(rows, sunset_dt, tides):
+    try:
+        headers = {
+            "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        now = datetime.datetime.now()
+
+        lines = []
+        for r in rows:
+            lines.append(
+                f"{r['hour_label']}: {r['walk_type']}, "
+                f"{r['temp']}°F, {r['conditions']}, {r['tide_state']}, "
+                f"{'dark' if r['dark'] else 'light'}"
+            )
+        condensed = "\n".join(lines)
+
+        tide_lines = []
+        for ex in tides:
+            tide_lines.append(
+                f"{ex['time'].strftime('%-I:%M %p')}: {ex['type']} ({ex['height']} m)"
+            )
+        tide_summary = "\n".join(tide_lines) if tide_lines else "No tide data available."
+
+        system_msg = (
+            f"The current date and time are {now.strftime('%Y-%m-%d %H:%M')}.\n"
+            f"Sunset time in Salem/Boston area is approximately {sunset_dt.strftime('%-I:%M %p')}.\n"
+            "You are a friendly dog-walking assistant for Steve the dog.\n\n"
+            "You are given:\n"
+            "- Real tide extremes (high and low) for Boston Harbor, MA from WorldTides for today.\n"
+            "- An hour-by-hour schedule that uses those real tides plus approximate weather for Salem, MA.\n\n"
+            "DATA QUALITY RULES:\n"
+            "- At the top of your response, include exactly this line (no more, no less):\n"
+            "  'Data status: Real tides, approximate weather.'\n"
+            "- Do NOT complain about missing live weather data or search results.\n"
+            "- Treat the provided schedule as the working basis for planning.\n\n"
+            "Your job:\n"
+            "- Write a short, friendly paragraph (3–5 sentences) explaining:\n"
+            "  * The best 1–2 windows for a walk today and what kind of walk (Forest / Golf Course / Swim) is best.\n"
+            "  * Any simple precautions (coat if below freezing, light if dark, avoid rain hours).\n"
+            "- Then add a brief bullet list summarizing 2–4 recommended hours and walk types.\n"
+            "- End by wishing Steve a fun walk.\n"
         )
 
-    if st.session_state.include_auto_zoom and st.session_state.image_bytes:
+        user_text = (
+            "Here are today's Boston Harbor tide extremes:\n"
+            f"{tide_summary}\n\n"
+            "Here is the hour-by-hour schedule (from now until 9 PM) with walk type, temperature, conditions, "
+            "tide state, and light/dark:\n"
+            f"{condensed}\n\n"
+            "Please follow the instructions above."
+        )
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_text},
+        ]
+
+        data = {
+            "model": "sonar-pro",
+            "messages": messages,
+            "max_tokens": 500,
+        }
+
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"(Could not get summary from Perplexity: {e})"
+
+
+# ---------- Main walk planning ----------
+def plan_walk():
+    now = datetime.datetime.now()
+    today_start, today_end = get_today_range()
+
+    try:
+        tides = get_tides_boston()
+        tide_ok = True
+        tide_error = ""
+    except Exception as e:
+        tides = []
+        tide_ok = False
+        tide_error = str(e)
+
+    if not tide_ok:
+        return None, None, None, [f"Tide data error: {tide_error}"]
+
+    sunset_dt = estimate_sunset()
+
+    rows = []
+    end_limit = today_end.replace(hour=21, minute=0, second=0)
+    t = now.replace(minute=0, second=0, microsecond=0)
+    while t <= end_limit:
+        temp, conditions, raining = approximate_weather_for_hour(t)
+        ts_state = tide_state_for_time(tides, t)
+        dark = is_dark(t, sunset_dt)
+        walk_type = classify_walk(temp, raining, ts_state, dark)
+
         try:
-            img = Image.open(BytesIO(st.session_state.image_bytes))
-            w, h = img.size
-            frac = st.session_state.zoom_fraction
-            frac = max(0.1, min(frac, 1.0))
+            hour_label = t.strftime("%-I %p")
+        except ValueError:
+            hour_label = t.strftime("%I %p")
 
-            cw, ch = int(w * frac), int(h * frac)
-            left_crop = (w - cw) // 2
-            top_crop = (h - ch) // 2
-            right_crop = left_crop + cw
-            bottom_crop = top_crop + ch
-            crop_center = img.crop((left_crop, top_crop, right_crop, bottom_crop))
+        rows.append(
+            {
+                "dt": t,
+                "hour_label": hour_label,
+                "temp": temp,
+                "conditions": conditions,
+                "tide_state": ts_state,
+                "dark": dark,
+                "walk_type": walk_type,
+            }
+        )
 
-            st.image(
-                crop_center,
-                caption=f"Auto zoom (center {int(frac * 100)}% of image)",
-                use_container_width=True,
+        t += datetime.timedelta(hours=1)
+
+    return rows, sunset_dt, tides, None
+
+
+# ---------- UI ----------
+st.markdown('<h1 class="wag-title">WAG: Walks Are Good 🐕</h1>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="wag-subtitle">'
+    "A dog-walking helper by We Are Dougalien — real tides, approximate weather for now."
+    "</div>",
+    unsafe_allow_html=True,
+)
+st.markdown('<div class="wag-separator">🐾 🦴 🐾</div>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="wag-body-text">'
+    "Press the button below to fetch today&apos;s Boston Harbor tides, approximate Salem weather, "
+    "and get an hour‑by‑hour walk plan for Steve."
+    "</p>",
+    unsafe_allow_html=True,
+)
+
+if st.button("Let&apos;s Go For a Walk"):
+    rows, sunset_dt, tides, errors = plan_walk()
+
+    if errors:
+        st.markdown('<div class="wag-card"><h3>Data status</h3>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="wag-body-text">'
+            "Sorry, I couldn&apos;t fetch the tide data I need right now.<br>"
+            + "<br>".join(errors)
+            + "</div></div>",
+            unsafe_allow_html=True,
+        )
+    elif not rows:
+        st.markdown('<div class="wag-card"><h3>Data status</h3>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="wag-body-text">'
+            "No valid hours found for the rest of today. Try again earlier in the day."
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        summary = summarize_with_perplexity(rows, sunset_dt, tides)
+
+        st.markdown(
+            '<div class="wag-card"><h3>Walk summary for Steve</h3>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="wag-body-text">{summary}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        table_html = [
+            '<table class="wag-table">',
+            "<tr>",
+            "<th>Hour</th>",
+            "<th>Walk type</th>",
+            "<th>Temp (°F)</th>",
+            "<th>Conditions</th>",
+            "<th>Tide</th>",
+            "<th>Light/Dark</th>",
+            "</tr>",
+        ]
+        for r in rows:
+            table_html.append(
+                "<tr>"
+                f"<td>{r['hour_label']}</td>"
+                f"<td>{r['walk_type']}</td>"
+                f"<td>{r['temp']}</td>"
+                f"<td>{r['conditions']}</td>"
+                f"<td>{r['tide_state']}</td>"
+                f"<td>{'Dark' if r['dark'] else 'Light'}</td>"
+                "</tr>"
             )
-        except Exception:
-            pass
+        table_html.append("</table>")
+        table_html_str = "\n".join(table_html)
 
-    st.markdown("### Student input (optional)")
-
-    st.session_state.student_observations = st.text_area(
-        "Your observations about the image",
-        value=st.session_state.student_observations,
-        height=100,
-        placeholder=(
-            "Describe colors, grain size, textures, layering, crystal shapes, etc."
-        ),
-    )
-
-    st.session_state.student_best_answer = st.text_input(
-        "Your best interpretation / name",
-        value=st.session_state.student_best_answer,
-        placeholder="e.g., well-sorted quartz sand, basalt, calcite crystal",
-    )
-
-    st.session_state.known_name = st.text_input(
-        "Known name (instructor provided)",
-        value=st.session_state.known_name,
-        placeholder="What your instructor says this sample is",
-    )
-
-    st.markdown("---")
-
-    start_disabled = st.session_state.image_data_uri is None
-
-    if st.button(
-        "Start first analysis",
-        type="primary",
-        disabled=start_disabled,
-        use_container_width=True,
-    ):
-        try:
-            start_first_analysis()
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
-
-    if st.session_state.started and st.session_state.display_messages:
-        if st.button("Save conversation", use_container_width=True):
-            try:
-                filename, content = save_conversation_to_file()
-                st.download_button(
-                    label="Download conversation log",
-                    data=content,
-                    file_name=filename,
-                    mime="text/plain",
-                    use_container_width=True,
-                )
-            except Exception as e:
-                st.error(str(e))
-
-with right:
-    st.markdown("### Conversation")
-
-    if not st.session_state.display_messages:
-        st.info("Upload an image and click **Start first analysis** to begin.")
-
-    for msg in st.session_state.display_messages:
-        with st.chat_message("assistant" if msg["role"] == "assistant" else "user"):
-            st.markdown(msg["content"])
-
-    if st.session_state.started:
-        prompt = st.chat_input("Ask a follow-up question or request a summary")
-        if prompt:
-            try:
-                send_followup(prompt)
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+        st.markdown(
+            '<div class="wag-card"><h3>Hour‑by‑hour walk conditions</h3>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(table_html_str, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
