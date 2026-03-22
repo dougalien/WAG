@@ -2,6 +2,110 @@ import datetime
 import requests
 import streamlit as st
 
+# ---------- Page & Theme ----------
+st.set_page_config(
+    page_title="WAG: Walks Are Good",
+    page_icon="🐾",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+
+# Dog‑friendly, color‑blind‑sensitive theme using CSS
+st.markdown(
+    """
+    <style>
+    :root {
+        /* Main colors: blue + gold (good for most color blindness),
+           plus a soft warm background and clear accents. */
+        --wag-bg: #FFF8E7;        /* warm, soft background */
+        --wag-primary: #1F7A8C;   /* teal‑blue for buttons/headers */
+        --wag-secondary: #F4A259; /* golden orange accent */
+        --wag-accent: #254441;    /* dark teal text/accent */
+        --wag-text: #1F2421;      /* high‑contrast main text */
+        --wag-muted: #5C6B73;     /* muted supporting text */
+    }
+
+    .main {
+        background-color: var(--wag-bg);
+    }
+
+    /* Center and style the title block */
+    .wag-title {
+        text-align: center;
+        padding: 0.5rem 0 0.25rem 0;
+        color: var(--wag-accent);
+        font-family: "Trebuchet MS", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .wag-subtitle {
+        text-align: center;
+        color: var(--wag-muted);
+        font-size: 0.95rem;
+        margin-bottom: 1.5rem;
+    }
+
+    /* Button styling */
+    div.stButton > button:first-child {
+        background: linear-gradient(135deg, var(--wag-primary), var(--wag-secondary));
+        color: white;
+        border: none;
+        border-radius: 999px;
+        padding: 0.6rem 1.6rem;
+        font-size: 1.05rem;
+        font-weight: 600;
+        font-family: "Trebuchet MS", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+        cursor: pointer;
+        transition: transform 0.05s ease-in-out, box-shadow 0.05s ease-in-out, filter 0.05s ease-in-out;
+    }
+
+    div.stButton > button:first-child:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.03);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.20);
+    }
+
+    div.stButton > button:first-child:active {
+        transform: translateY(0px);
+        box-shadow: 0 3px 7px rgba(0, 0, 0, 0.18);
+    }
+
+    /* Card‑like container for results */
+    .wag-card {
+        background-color: #FFFFFF;
+        border-radius: 14px;
+        padding: 1.1rem 1.3rem;
+        margin-top: 1.2rem;
+        border: 1px solid rgba(31, 122, 140, 0.08);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+    }
+
+    .wag-card h3 {
+        margin-top: 0;
+        color: var(--wag-primary);
+        font-family: "Trebuchet MS", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    /* Improve base text readability */
+    .wag-body-text {
+        color: var(--wag-text);
+        font-size: 0.98rem;
+        line-height: 1.5;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    /* Paw print separators */
+    .wag-separator {
+        text-align: center;
+        color: var(--wag-secondary);
+        font-size: 1.3rem;
+        margin: 0.5rem 0 1.0rem 0;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ---------- API Key (Perplexity only) ----------
 PERPLEXITY_API_KEY = st.secrets["PERPLEXITY_API_KEY"]
 
@@ -62,11 +166,28 @@ def call_sonar_for_walk(user_input: str) -> str:
         return f"API request failed: {e}"
 
 # ---------- Streamlit UI ----------
-st.title("WAG: Walks Are Good")
-st.write("A dogwalking helper by We Are Dougalien")
-st.write("Press the button to plan Steve's walk")
+st.markdown('<h1 class="wag-title">WAG: Walks Are Good 🐕</h1>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="wag-subtitle">A dog-walking helper by We Are Dougalien — tuned for tides, weather, and Steve.</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown('<div class="wag-separator">🐾 🦴 🐾</div>', unsafe_allow_html=True)
+
+st.markdown(
+    '<p class="wag-body-text">'
+    "Press the button below to fetch today&apos;s tides and weather and get an hour‑by‑hour walk plan for Steve."
+    "</p>",
+    unsafe_allow_html=True,
+)
 
 if st.button("Let's Go For a Walk"):
     text = call_sonar_for_walk("walk")
-    st.subheader("Walk plan for Steve")
-    st.write(text)
+    st.markdown(
+        '<div class="wag-card"><h3>Walk plan for Steve</h3>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="wag-body-text">{text}</div></div>',
+        unsafe_allow_html=True,
+    )
