@@ -5,15 +5,13 @@ import logging
 import sqlite3
 import datetime
 import requests
-import openai
 import streamlit as st
 
 # ---------- Logging ----------
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ---------- API Keys (from Streamlit secrets) ----------
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-perplexity_api_key = st.secrets["PERPLEXITY_API_KEY"]
+# ---------- API Key (Perplexity only) ----------
+PERPLEXITY_API_KEY = st.secrets["PERPLEXITY_API_KEY"]
 
 # ---------- User ID Management ----------
 USER_ID_FILE = "user_id.txt"
@@ -85,124 +83,90 @@ def get_chat_history():
         logging.error(f"Database error: {e}")
         return []
 
-# ---------- Perplexity Call (same logic as WAG.py) ----------
-def get_perplexity_response(user_input: str) -> str:
+# ---------- Perplexity (Sonar) Call ----------
+def call_sonar_for_walk(user_input: str) -> str:
+    """
+    Single Perplexity call that:
+    - Fetches tide info for Boston Harbor, MA
+    - Fetches weather for Salem, MA
+    - Applies your walk rules for Steve
+    - Produces the hour-by-hour walk plan
+    This merges the old Perplexity + OpenAI steps into one.
+    """
     try:
         headers = {
-            "Authorization": f"Bearer {perplexity_api_key}",
+            "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
             "Content-Type": "application/json",
         }
 
         current_datetime = datetime.datetime.now()
 
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"The current date and time are: {current_datetime.strftime('%Y-%m-%d %H:%M:%S')}.\n\n"
+                    "Your specialty is to fetch tide information for Boston Harbor, MA and weather information for Salem, MA for the current day using web search.\n"
+                    "In this app, if the word 'walk' is used in the input, always assume the user is asking for tide and weather data for the current day for Boston Harbor and Salem, MA.\n"
+                    "Use https://www.usharbors.com/harbor/Massachusetts/Boston-Harbor-ma/tides for Boston Harbor tides and sunset time.\n\n"
+                    "Step 1: Fetch and summarize today's tides (high/low and approximate times), sunset time in Boston Harbor, and weather (temperature in °F and conditions) in Salem, MA for each hour from now until 9 PM.\n"
+                    "Step 2: Using those data, apply these dog-walk rules for Steve:\n"
+                    "- If temperature ≤ 32°F: Forest Walk before sundown; Golf Course Walk after sundown; Stay Home if it is raining.\n"
+                    "- If 32°F < temperature ≤ 60°F: Forest Walk before sundown; Golf Course Walk after sundown; Stay Home if it is raining.\n"
+                    "- If temperature > 60°F: Swim Walk around high tide and good weather; Forest Walk around low tide; Stay Home any time it is raining.\n"
+                    "Step 3: Create an hour-by-hour list from now until 9 PM. For each hour, include:\n"
+                    "- Hour (12-hour format with am/pm)\n"
+                    "- Recommended walk type (Forest Walk, Golf Course Walk, Swim Walk, or Stay Home)\n"
+                    "- Temperature in °F\n"
+                    "- Weather conditions\n"
+                    "- Indication of high/low tide relevance if important.\n"
+                    "Encourage a coat when it is below 32°F and a light when it is dark.\n"
+                    "The dog's name is Steve. At the end of your response, wish Steve a fun walk.\n"
+                    "If some data are approximate, clearly state that they are approximate but still provide your best walk recommendations.\n"
+                ),
+            },
+            {
+                "role": "user",
+                "content": user_input,
+            },
+        ]
+
         data = {
-            "model": "llama-3.1-sonar-small-128k-online",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Your specialty is to fetch tide information for Boston Harbor, MA and weather information for Salem, MA for the current day. "
-                        "In this app, if the word 'walk' is used in the input then always assume the user is asking for tide and weather data for the current day for Boston Harbor and Salem, MA. "
-                        "Make sure your response is correct by finding corroborating data to support your response and please include the time of the input. "
-                        "The following url has tide and sunset data for the month at Boston Harbor. https://www.usharbors.com/harbor/Massachusetts/Boston-Harbor-ma/tides. "
-                        "Create a table with a column of hour of the day in the 12 hour format a row on sunset time and another row of temperature in degrees F, a row of an indication of the weather conditions and finally a row that indications of high and low tide."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": user_input,
-                },
-            ],
+            "model": "sonar-pro",  # Sonar Pro model name for chat completions
+            "messages": messages,
+            "max_tokens": 1200,
         }
 
         response = requests.post(
             "https://api.perplexity.ai/chat/completions", headers=headers, json=data
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
+        content = response.json()["choices"][0]["message"]["content"].strip()
+        return content
     except requests.exceptions.RequestException as e:
         logging.error(f"Perplexity API request failed: {e}")
         return f"API request failed: {e}"
 
-# ---------- OpenAI Call (same logic as WAG.py) ----------
-def get_openai_response(messages):
-    try:
-        logging.debug(f"Messages sent to OpenAI: {messages}")
-
-        current_datetime = datetime.datetime.now()
-
-        # Insert current date/time system message at the front
-        messages.insert(
-            0,
-            {
-                "role": "system",
-                "content": (
-                    f"The current date and time are: {current_datetime.strftime('%Y-%m-%d %H:%M:%S')}."
-                ),
-            },
-        )
-
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-        )
-
-        openai_response = response.choices[0].message.content.strip()
-        logging.debug(f"OpenAI Response: {openai_response}")
-        return openai_response
-    except openai.OpenAIError as e:
-        logging.error(f"OpenAI API error: {e}")
-        return f"API request failed: {e}"
-
-# ---------- Core Walk Logic (adapted from WAG.py) ----------
+# ---------- Core Walk Logic (Perplexity-only) ----------
 def process_walk():
     user_input = "walk"
 
-    # Perplexity: tide + weather for Boston Harbor / Salem
-    perplexity_response = get_perplexity_response(user_input)
+    # Include prior chat history if you want continuity
+    history = get_chat_history()
+    # We won't send full history to Perplexity here to keep it simple,
+    # but you could prepend history as additional messages if desired.
 
-    # Show Perplexity response in Streamlit
-    st.subheader("Perplexity Tide & Weather (Boston Harbor / Salem)")
-    st.write(perplexity_response)
+    sonar_response = call_sonar_for_walk(user_input)
 
-    # Store Perplexity response in history if you want it in context
-    add_to_chat_history("assistant", perplexity_response)
+    add_to_chat_history("user", user_input)
+    add_to_chat_history("assistant", sonar_response)
 
-    # Chat history from DB
-    chat_history = get_chat_history()
-
-    # OpenAI system instructions (same as original WAG.py)
-    openai_messages = [
-        {
-            "role": "system",
-            "content": (
-                "Determine the accurate time in Salem, MA and the time of sun-up and sun-down. Always Salem, MA"
-                "Use the time of sun-up and sun-down to determine light or dark and anticipate condition changes during the walk considering a length of about an hour. "
-                "If the temperature is 32 F or below, it's time for a Forest Walk before sun-down and a Golf Course Walk after sun-down and Stay Home if it is raining. If the temperature is between 32 F and 60 F, it's time for a Forest walk before sun-down and a Golf Course walk after sun-down and Stay Home if it is raining. If it's above 60 F then a Swim Walk is around high tide and good weather, a Forest Walk is around low tide and Stay Home is any time it is raining. "
-                "Always provide a brief hour by hour list from the time of input until 9 PM. Include the type of walk, the temperature, and the weather for each hour. "
-                "The dog's name is Steve. Please wish him a fun walk at the end of your response. "
-                "Assume the walk will take about an hour and always provide a list of dog walking conditions hour by hour, not just the current hour. Encourge a coat when it is below 32 F and a light when it is dark. "
-            ),
-        }
-    ] + chat_history + [
-        {
-            "role": "user",
-            "content": user_input,
-        }
-    ]
-
-    if openai_messages:
-        openai_response = get_openai_response(openai_messages)
-        add_to_chat_history("assistant", openai_response)
-        st.subheader("Walk Plan for Steve")
-        st.write(openai_response)
-    else:
-        st.error("Error: No messages to send to OpenAI.")
+    st.subheader("Walk plan for Steve (Perplexity Sonar)")
+    st.write(sonar_response)
 
 # ---------- Streamlit UI ----------
 st.title("We Are Dougalien - Stevie's Walk Buddy")
-
-st.write("Press the button to plan Steve's walk based on current tides and weather.")
+st.write("Press the button to plan Steve's walk using tides and weather from Perplexity Sonar.")
 
 if st.button("Walk!"):
     process_walk()
