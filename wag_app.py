@@ -120,34 +120,44 @@ def call_sonar_for_walk(user_input: str) -> str:
         current_datetime = datetime.datetime.now()
 
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"The current date and time are: {current_datetime.strftime('%Y-%m-%d %H:%M:%S')}.\n\n"
-                    "Your specialty is to fetch tide information for Boston Harbor, MA and weather information for Salem, MA for the current day using web search.\n"
-                    "In this app, if the word 'walk' is used in the input, always assume the user is asking for tide and weather data for the current day for Boston Harbor and Salem, MA.\n"
-                    "Use https://www.usharbors.com/harbor/Massachusetts/Boston-Harbor-ma/tides for Boston Harbor tides and sunset time.\n\n"
-                    "Step 1: Fetch and summarize today's tides (high/low and approximate times), sunset time in Boston Harbor, and weather (temperature in °F and conditions) in Salem, MA for each hour from now until 9 PM.\n"
-                    "Step 2: Using those data, apply these dog-walk rules for Steve:\n"
-                    "- If temperature ≤ 32°F: Forest Walk before sundown; Golf Course Walk after sundown; Stay Home if it is raining.\n"
-                    "- If 32°F < temperature ≤ 60°F: Forest Walk before sundown; Golf Course Walk after sundown; Stay Home if it is raining.\n"
-                    "- If temperature > 60°F: Swim Walk around high tide and good weather; Forest Walk around low tide; Stay Home any time it is raining.\n"
-                    "Step 3: Create an hour-by-hour list from now until 9 PM. For each hour, include:\n"
-                    "- Hour (12-hour format with am/pm)\n"
-                    "- Recommended walk type (Forest Walk, Golf Course Walk, Swim Walk, or Stay Home)\n"
-                    "- Temperature in °F\n"
-                    "- Weather conditions\n"
-                    "- Indication of high/low tide relevance if important.\n"
-                    "Encourage a coat when it is below 32°F and a light when it is dark.\n"
-                    "The dog's name is Steve. At the end of your response, wish Steve a fun walk.\n"
-                    "If some data are approximate, clearly state that they are approximate but still provide your best walk recommendations.\n"
-                ),
-            },
-            {
-                "role": "user",
-                "content": user_input,
-            },
-        ]
+    {
+        "role": "system",
+        "content": (
+            f"The current date and time are: {current_datetime.strftime('%Y-%m-%d %H:%M:%S')}.\n\n"
+            "Your job is to help Steve the dog go for a walk today, using tides in Boston Harbor, MA and weather in Salem, MA.\n"
+            "Use web search and, when available, sites like https://www.usharbors.com/harbor/Massachusetts/Boston-Harbor-ma/tides "
+            "for Boston Harbor tides and sunset time, and reliable weather sources for Salem, MA.\n\n"
+            "INSTRUCTIONS ABOUT DATA QUALITY:\n"
+            "1) If you can find reasonably current tide and weather information for today:\n"
+            "   - Begin the report with: 'Data status: Live-ish data found for today.'\n"
+            "   - Then give a clear, simple report. You may still mark values as approximate if needed.\n"
+            "2) If you cannot find reasonably current or detailed information and must rely mostly on typical patterns or older data:\n"
+            "   - Begin the report with: 'Data status: Using approximate/typical conditions for this time of year.'\n"
+            "   - Keep any explanation of limitations to 1–2 short sentences, then focus on practical recommendations.\n\n"
+            "WALK PLANNING RULES FOR STEVE:\n"
+            "- Treat the user input 'walk' as a request for tide and weather data for the current day for Boston Harbor and Salem, MA.\n"
+            "- Summarize today's tides (approximate times of high and low) and sunset time, and weather (temperature in °F and conditions) "
+            "for each hour from now until 9 PM, as precisely as available.\n"
+            "- Apply these dog-walk rules:\n"
+            "  * If temperature ≤ 32°F: Forest Walk before sundown; Golf Course Walk after sundown; Stay Home if it is raining.\n"
+            "  * If 32°F < temperature ≤ 60°F: Forest Walk before sundown; Golf Course Walk after sundown; Stay Home if it is raining.\n"
+            "  * If temperature > 60°F: Swim Walk around high tide and good weather; Forest Walk around low tide; Stay Home any time it is raining.\n"
+            "- Create an hour-by-hour list from now until 9 PM. For each hour, include:\n"
+            "  * Hour (12-hour format with am/pm)\n"
+            "  * Recommended walk type (Forest Walk, Golf Course Walk, Swim Walk, or Stay Home)\n"
+            "  * Temperature in °F\n"
+            "  * Weather conditions\n"
+            "  * Note high/low tide when relevant.\n"
+            "- Encourage a coat when it is below 32°F and a light when it is dark.\n"
+            "- The dog's name is Steve. End your response by wishing Steve a fun walk.\n"
+            "Keep the overall response easy to read, like a friendly note to a human dog‑walker (not technical).\n"
+        ),
+    },
+    {
+        "role": "user",
+        "content": user_input,
+    },
+]
 
         data = {
             "model": "sonar-pro",
