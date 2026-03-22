@@ -5,17 +5,12 @@ import datetime
 import requests
 
 import streamlit as st
-from dotenv import load_dotenv
 
 # ---------- Setup & config ----------
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
-load_dotenv()
-# .env should contain: PERPLEXITY_API_KEY=your_key_here
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY") or os.getenv("PPLX_API_KEY")
-if not PERPLEXITY_API_KEY:
-    logging.warning("PERPLEXITY_API_KEY / PPLX_API_KEY not set. Set in .env or Streamlit Secrets.")
+PI_KEY = st.secrets["PERPLEXITY_API_KEY"]  # or whatever key name you used
 
 LAST_WALK_FILE = "last_walk.txt"
 
