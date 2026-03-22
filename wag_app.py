@@ -10,7 +10,7 @@ import streamlit as st
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
-PI_KEY = st.secrets["PERPLEXITY_API_KEY"]  # or whatever key name you used
+PERPLEXITY_API_KEY = st.secrets["PERPLEXITY_API_KEY"]
 
 LAST_WALK_FILE = "last_walk.txt"
 
