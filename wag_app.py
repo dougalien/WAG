@@ -62,9 +62,9 @@ def call_sonar_for_walk(user_input: str) -> str:
         return f"API request failed: {e}"
 
 # ---------- Streamlit UI ----------
-st.title("WAG: Walks ARE GOOD")
-st.write("by We Are Dougalien")
-st.write("Press the button to plan Steve's walk using tides and weather from Perplexity Sonar.")
+st.title("WAG: Walks Are Good")
+st.write("A dogwalking helper by We Are Dougalien")
+st.write("Press the button to plan Steve's walk")
 
 if st.button("Let's Go For a Walk"):
     text = call_sonar_for_walk("walk")
