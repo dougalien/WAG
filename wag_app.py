@@ -130,15 +130,11 @@ st.markdown(
 # ---------- API Keys from Streamlit secrets ----------
 PERPLEXITY_API_KEY = st.secrets["PERPLEXITY_API_KEY"]
 WORLDTIDES_API_KEY = st.secrets["WORLDTIDES_API_KEY"]
-OPENWEATHERMAP_API_KEY = st.secrets["OPENWEATHERMAP_API_KEY"]
 
 # ---------- Fixed Locations ----------
-# Boston Harbor approx
 BOSTON_LAT = 42.35
-BOSTON_LON = -71.05
-# Salem, MA
-SALEM_LAT = 42.52
-SALEM_LON = -70.90
+BOSTON_LON = -71.05  # Boston Harbor
+# We still assume Salem, MA for weather, but weather is approximate.
 
 
 # ---------- Time helpers ----------
@@ -149,8 +145,11 @@ def get_today_range():
     return start, end
 
 
-# ---------- WorldTides ----------
+# ---------- WorldTides (real tides) ----------
 def get_tides_boston():
+    """
+    Use WorldTides 'extremes' endpoint to get today's high/low tides for Boston Harbor.
+    """
     start, end = get_today_range()
     start_ts = int(start.timestamp())
     end_ts = int(end.timestamp())
@@ -189,22 +188,43 @@ def tide_state_for_time(tides, t, window_hours=1.5):
     return "Mid tide"
 
 
-# ---------- OpenWeatherMap ----------
-def get_hourly_weather_salem():
+# ---------- Approximate weather model ----------
+def approximate_weather_for_hour(t: datetime.datetime):
     """
-    Uses OpenWeather One Call 3.0 hourly forecast for Salem, MA.
-    If your account only supports 2.5, change '3.0' to '2.5' below.
+    Simple approximate weather curve for Salem, MA:
+    - Cool mornings, warmer mid-afternoon, cooling evening.
+    - Mostly dry, with low probability of 'light rain'.
     """
-    url = (
-        "https://api.openweathermap.org/data/3.0/onecall"
-        f"?lat={SALEM_LAT}&lon={SALEM_LON}"
-        "&exclude=current,minutely,daily,alerts"
-        f"&appid={OPENWEATHERMAP_API_KEY}&units=imperial"
-    )
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("hourly", [])
+    hour = t.hour
+    # Rough diurnal temp curve in °F: min 30s at night, 40s–50s midday
+    # Use a cosine centered at 15:00 (3 PM) as warmest.
+    # This is heuristic, not real weather.
+    center = 15
+    span = 12
+    # Normalize hour difference
+    diff = (hour - center) / span
+    # Base 40°F with +/- 10°F swing
+    temp = 40 + 10 * math.cos(diff * math.pi)
+
+    # Simple condition: mostly clear/cloudy, occasional light rain in late afternoon/evening
+    if 16 <= hour <= 19:
+        # 30% chance of light rain feel; but deterministic here: alternate by even/odd day
+        if datetime.datetime.now().day % 2 == 0:
+            conditions = "Light rain"
+            raining = True
+        else:
+            conditions = "Mostly cloudy"
+            raining = False
+    else:
+        if 10 <= hour <= 15:
+            conditions = "Partly cloudy"
+        elif hour < 10:
+            conditions = "Mostly cloudy"
+        else:
+            conditions = "Clear"
+        raining = False
+
+    return round(temp), conditions, raining
 
 
 # ---------- Sunlight ----------
@@ -236,8 +256,8 @@ def classify_walk(temp_f, is_raining, tide_state, dark):
             return "Forest Walk"
 
 
-# ---------- Perplexity summary ----------
-def summarize_with_perplexity(rows, sunset_dt):
+# ---------- Perplexity summary (uses real tides + approximate weather) ----------
+def summarize_with_perplexity(rows, sunset_dt, tides):
     try:
         headers = {
             "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -246,6 +266,7 @@ def summarize_with_perplexity(rows, sunset_dt):
 
         now = datetime.datetime.now()
 
+        # Build a compact schedule string
         lines = []
         for r in rows:
             lines.append(
@@ -255,35 +276,52 @@ def summarize_with_perplexity(rows, sunset_dt):
             )
         condensed = "\n".join(lines)
 
+        # Summarize tides for context
+        tide_lines = []
+        for ex in tides:
+            tide_lines.append(
+                f"{ex['time'].strftime('%-I:%M %p')}: {ex['type']} ({ex['height']} m)"
+            )
+        tide_summary = "\n".join(tide_lines) if tide_lines else "No tide data available."
+
         system_msg = (
             f"The current date and time are {now.strftime('%Y-%m-%d %H:%M')}.\n"
             f"Sunset time in Salem/Boston area is approximately {sunset_dt.strftime('%-I:%M %p')}.\n"
-            "You are a friendly dog-walking assistant for Steve the dog.\n"
-            "You have been given an hour-by-hour schedule with recommended walk type, "
-            "temperature, conditions, tide state, and whether it is light or dark.\n"
-            "Write a short, friendly paragraph (3–5 sentences) explaining:\n"
-            "- The best 1–2 windows for a walk today and what kind of walk (Forest / Golf Course / Swim) is best.\n"
-            "- Any simple precautions (coat if below freezing, light if dark).\n"
-            "End by wishing Steve a fun walk.\n"
-            "Do NOT complain about missing live data or search results. Assume the schedule you receive is correct.\n"
+            "You are a friendly dog-walking assistant for Steve the dog.\n\n"
+            "You are given:\n"
+            "- Real tide extremes (high and low) for Boston Harbor, MA from WorldTides for today.\n"
+            "- An hour-by-hour schedule that uses those real tides plus approximate weather for Salem, MA.\n\n"
+            "DATA QUALITY RULES:\n"
+            "- At the top of your response, include exactly this line (no more, no less):\n"
+            "  'Data status: Real tides, approximate weather.'\n"
+            "- Do NOT complain about missing live weather data or search results.\n"
+            "- Treat the provided schedule as the working basis for planning.\n\n"
+            "Your job:\n"
+            "- Write a short, friendly paragraph (3–5 sentences) explaining:\n"
+            "  * The best 1–2 windows for a walk today and what kind of walk (Forest / Golf Course / Swim) is best.\n"
+            "  * Any simple precautions (coat if below freezing, light if dark, avoid rain hours).\n"
+            "- Then add a brief bullet list summarizing 2–4 recommended hours and walk types.\n"
+            "- End by wishing Steve a fun walk.\n"
+        )
+
+        user_text = (
+            "Here are today's Boston Harbor tide extremes:\n"
+            f"{tide_summary}\n\n"
+            "Here is the hour-by-hour schedule (from now until 9 PM) with walk type, temperature, conditions, "
+            "tide state, and light/dark:\n"
+            f"{condensed}\n\n"
+            "Please follow the instructions above."
         )
 
         messages = [
             {"role": "system", "content": system_msg},
-            {
-                "role": "user",
-                "content": (
-                    "Here is the schedule:\n"
-                    f"{condensed}\n\n"
-                    "Please follow the instructions above."
-                ),
-            },
+            {"role": "user", "content": user_text},
         ]
 
         data = {
             "model": "sonar-pro",
             "messages": messages,
-            "max_tokens": 400,
+            "max_tokens": 500,
         }
 
         resp = requests.post(
@@ -303,7 +341,7 @@ def plan_walk():
     now = datetime.datetime.now()
     today_start, today_end = get_today_range()
 
-    # Tides
+    # Real tides
     try:
         tides = get_tides_boston()
         tide_ok = True
@@ -313,45 +351,19 @@ def plan_walk():
         tide_ok = False
         tide_error = str(e)
 
-    # Weather
-    try:
-        hourly = get_hourly_weather_salem()
-        weather_ok = True
-        weather_error = ""
-    except Exception as e:
-        hourly = []
-        weather_ok = False
-        weather_error = str(e)
-
-    errors = []
     if not tide_ok:
-        errors.append(f"Tide data error: {tide_error}")
-    if not weather_ok:
-        errors.append(f"Weather data error: {weather_error}")
-    if errors:
-        return None, None, errors
+        return None, None, None, [f"Tide data error: {tide_error}"]
 
     sunset_dt = estimate_sunset()
 
     rows = []
     end_limit = today_end.replace(hour=21, minute=0, second=0)
-    for h in hourly:
-        t = datetime.datetime.fromtimestamp(h["dt"])
-        if t < now or t > end_limit:
-            continue
-
-        temp = round(h.get("temp", 0))
-        weather_desc = h.get("weather", [{}])[0].get("description", "").capitalize()
-
-        rain = False
-        if "rain" in weather_desc.lower() or "drizzle" in weather_desc.lower():
-            rain = True
-        if h.get("rain"):
-            rain = True
-
+    t = now.replace(minute=0, second=0, microsecond=0)
+    while t <= end_limit:
+        temp, conditions, raining = approximate_weather_for_hour(t)
         ts_state = tide_state_for_time(tides, t)
         dark = is_dark(t, sunset_dt)
-        walk_type = classify_walk(temp, rain, ts_state, dark)
+        walk_type = classify_walk(temp, raining, ts_state, dark)
 
         try:
             hour_label = t.strftime("%-I %p")
@@ -363,39 +375,43 @@ def plan_walk():
                 "dt": t,
                 "hour_label": hour_label,
                 "temp": temp,
-                "conditions": weather_desc,
+                "conditions": conditions,
                 "tide_state": ts_state,
                 "dark": dark,
                 "walk_type": walk_type,
             }
         )
 
-    return rows, sunset_dt, None
+        t += datetime.timedelta(hours=1)
+
+    return rows, sunset_dt, tides, None
 
 
 # ---------- UI ----------
 st.markdown('<h1 class="wag-title">WAG: Walks Are Good 🐕</h1>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="wag-subtitle">A dog-walking helper by We Are Dougalien — using real tides and weather.</div>',
+    '<div class="wag-subtitle">'
+    "A dog-walking helper by We Are Dougalien — real tides, approximate weather for now."
+    "</div>",
     unsafe_allow_html=True,
 )
 st.markdown('<div class="wag-separator">🐾 🦴 🐾</div>', unsafe_allow_html=True)
 st.markdown(
     '<p class="wag-body-text">'
-    "Press the button below to fetch today&apos;s Boston Harbor tides and Salem weather "
+    "Press the button below to fetch today&apos;s Boston Harbor tides, approximate Salem weather, "
     "and get an hour‑by‑hour walk plan for Steve."
     "</p>",
     unsafe_allow_html=True,
 )
 
 if st.button("Let&apos;s Go For a Walk"):
-    rows, sunset_dt, errors = plan_walk()
+    rows, sunset_dt, tides, errors = plan_walk()
 
     if errors:
         st.markdown('<div class="wag-card"><h3>Data status</h3>', unsafe_allow_html=True)
         st.markdown(
             '<div class="wag-body-text">'
-            "Sorry, I couldn&apos;t fetch all the live data I need right now.<br>"
+            "Sorry, I couldn&apos;t fetch the tide data I need right now.<br>"
             + "<br>".join(errors)
             + "</div></div>",
             unsafe_allow_html=True,
@@ -409,7 +425,7 @@ if st.button("Let&apos;s Go For a Walk"):
             unsafe_allow_html=True,
         )
     else:
-        summary = summarize_with_perplexity(rows, sunset_dt)
+        summary = summarize_with_perplexity(rows, sunset_dt, tides)
 
         st.markdown(
             '<div class="wag-card"><h3>Walk summary for Steve</h3>',
