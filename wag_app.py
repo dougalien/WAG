@@ -5,7 +5,7 @@ import streamlit as st
 
 # ---------- Page & Theme ----------
 st.set_page_config(
-    page_title="WAG: Walks Are Good",
+    page_title="WAG: Walks Are Good created by We are dougalien (www.dougalien.com)",
     page_icon="🐾",
     layout="centered",
     initial_sidebar_state="collapsed",
