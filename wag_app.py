@@ -5,7 +5,7 @@ import streamlit as st
 
 # ---------- Page & Theme ----------
 st.set_page_config(
-    page_title="WAG: Walks Are Good created by We are dougalien (www.dougalien.com)",
+    page_title="WAG: Walks Are Good",
     page_icon="🐾",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -371,7 +371,7 @@ def plan_walk():
 st.markdown('<h1 class="wag-title">WAG: Walks Are Good 🐕</h1>', unsafe_allow_html=True)
 st.markdown(
     '<div class="wag-subtitle">'
-    "A dog-walking helper by We Are Dougalien — real tides, approximate weather for now."
+    "A dog-walking helper by We are dougalien (www.dougalien.com) — real tides, approximate weather for now."
     "</div>",
     unsafe_allow_html=True,
 )
