@@ -2,6 +2,7 @@ import os
 import math
 import html
 from datetime import datetime
+from typing import Dict, Optional
 
 import pandas as pd
 import requests
@@ -17,6 +18,12 @@ st.set_page_config(page_title="WAG", layout="wide")
 MAPBOX_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places"
 WORLDTIDES_URL = "https://www.worldtides.info/api/v3"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+OPENAI_MODEL_FAST = "gpt-4o-mini"
+OPENAI_MODEL_STRONG = "gpt-4o"
+GEMINI_MODEL = "gemini-2.0-flash"
+TIMEOUT = 60
 
 # =========================================================
 # SECRETS
@@ -30,10 +37,9 @@ def get_secret(name: str, default: str = "") -> str:
 
 APP_PASSWORD = get_secret("APP_PASSWORD")
 OPENAI_KEY = get_secret("OPENAI_API_KEY")
+GEMINI_KEY = get_secret("GEMINI_API_KEY")
 MAPBOX_KEY = get_secret("MAPBOX_API_KEY")
 WORLDTIDES_KEY = get_secret("WORLDTIDES_API_KEY")
-ANTHROPIC_KEY = get_secret("ANTHROPIC_API_KEY")
-PERPLEXITY_KEY = get_secret("PERPLEXITY_API_KEY")
 
 # =========================================================
 # STATE
@@ -66,6 +72,11 @@ def init_state():
         "backup_plan": "",
         "audio_text": "",
         "raw_location_result": None,
+        "analysis_mode": "Cost-aware balanced",
+        "routing_meta": {},
+        "openai_text": "",
+        "gemini_text": "",
+        "judge_text": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -161,6 +172,7 @@ textarea, input {
 def display_name():
     return st.session_state.dog_name.strip() or "Your dog"
 
+
 def haversine_miles(lat1, lon1, lat2, lon2):
     r = 3958.8
     phi1 = math.radians(lat1)
@@ -170,8 +182,10 @@ def haversine_miles(lat1, lon1, lat2, lon2):
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+
 def safe_lower(text):
     return (text or "").lower()
+
 
 def audio_button(text_to_speak: str):
     safe_text = html.escape(text_to_speak).replace("\n", " ")
@@ -195,6 +209,27 @@ def audio_button(text_to_speak: str):
         """,
         height=60,
     )
+
+
+def available_providers() -> Dict[str, bool]:
+    return {
+        "openai": bool(OPENAI_KEY),
+        "gemini": bool(GEMINI_KEY),
+    }
+
+
+def reset_walk_outputs():
+    st.session_state.candidate_places = []
+    st.session_state.top_places = []
+    st.session_state.selected_place = None
+    st.session_state.tide_data = None
+    st.session_state.recommendation = ""
+    st.session_state.backup_plan = ""
+    st.session_state.audio_text = ""
+    st.session_state.routing_meta = {}
+    st.session_state.openai_text = ""
+    st.session_state.gemini_text = ""
+    st.session_state.judge_text = ""
 
 # =========================================================
 # LOGIN
@@ -248,6 +283,7 @@ def reverse_geocode(lat, lon):
         return "Unknown location"
     return features[0]["place_name"]
 
+
 def geocode_place(place_text):
     url = f"{MAPBOX_URL}/{place_text}.json"
     params = {
@@ -269,6 +305,7 @@ def geocode_place(place_text):
         "lon": lon,
         "place_name": feature["place_name"]
     }
+
 
 def mapbox_search(query, lat, lon, limit=8):
     url = f"{MAPBOX_URL}/{query}.json"
@@ -299,6 +336,7 @@ def mapbox_search(query, lat, lon, limit=8):
             continue
     return results
 
+
 def walk_queries(style):
     mapping = {
         "Best Walk Now": ["park", "trail", "beach"],
@@ -310,6 +348,7 @@ def walk_queries(style):
         "Beach Walk": ["beach", "shore", "harbor", "point"],
     }
     return mapping.get(style, ["park", "trail"])
+
 
 def gather_candidates(lat, lon, style):
     seen = {}
@@ -421,6 +460,7 @@ def score_place(place, style):
 
     return round(score, 2)
 
+
 def rank_candidates(candidates, style):
     ranked = []
     for place in candidates:
@@ -432,7 +472,7 @@ def rank_candidates(candidates, style):
     return ranked[:3]
 
 # =========================================================
-# OPENAI
+# AI ROUTING
 # =========================================================
 
 def build_ai_prompt(top_places, tide_data):
@@ -450,10 +490,10 @@ def build_ai_prompt(top_places, tide_data):
         )
 
     return f"""
-Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Current location: {st.session_state.location_name}
 Dog name: {display_name()}
-Dog age: {st.session_state.dog_age or "[not provided]"}
+Dog age: {st.session_state.dog_age or '[not provided]'}
 Dog size: {st.session_state.dog_size}
 Energy level: {st.session_state.energy_level}
 Heat tolerance: {st.session_state.heat_tolerance}
@@ -474,22 +514,17 @@ Also give one backup option.
 Keep it concise and phone-friendly.
 """
 
-def get_openai_recommendation(top_places, tide_data):
+
+def call_openai_text(prompt: str, system: str, model: str = OPENAI_MODEL_FAST) -> str:
     if not OPENAI_KEY:
         raise RuntimeError("Missing OPENAI_API_KEY.")
 
     payload = {
-        "model": "gpt-4o",
-        "temperature": 0.3,
+        "model": model,
+        "temperature": 0.2,
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a concise, practical, mobile-first dog walk planner."
-            },
-            {
-                "role": "user",
-                "content": build_ai_prompt(top_places, tide_data)
-            }
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
         ]
     }
 
@@ -500,10 +535,104 @@ def get_openai_recommendation(top_places, tide_data):
             "Content-Type": "application/json"
         },
         json=payload,
-        timeout=60
+        timeout=TIMEOUT
     )
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def call_gemini_text(prompt: str, system: str) -> str:
+    if not GEMINI_KEY:
+        raise RuntimeError("Missing GEMINI_API_KEY.")
+
+    url = f"{GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
+    payload = {
+        "generationConfig": {
+            "temperature": 0.2
+        },
+        "contents": [{
+            "parts": [
+                {"text": system},
+                {"text": prompt}
+            ]
+        }]
+    }
+
+    r = requests.post(url, json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+def disagreement_needed(text1: str, text2: str) -> bool:
+    a = safe_lower(text1)
+    b = safe_lower(text2)
+    if not a or not b:
+        return False
+    markers = ["backup", "best option", "suggested", "recommend", "avoid", "beach", "trail", "park"]
+    overlaps = sum(1 for m in markers if (m in a and m in b))
+    return overlaps < 3 or a[:120] != b[:120]
+
+
+def get_walk_recommendation(top_places, tide_data):
+    prompt = build_ai_prompt(top_places, tide_data)
+    providers = available_providers()
+    mode = st.session_state.analysis_mode
+    routing_meta = {"mode": mode, "errors": []}
+
+    system = "You are a concise, practical, mobile-first dog walk planner. Use only the provided place list and context."
+    judge_system = "You are a cautious planner choosing the best final recommendation from candidate summaries. Keep the answer concise and phone-friendly."
+
+    openai_text = ""
+    gemini_text = ""
+    judge_text = ""
+
+    if not providers["openai"] and not providers["gemini"]:
+        raise RuntimeError("Add OPENAI_API_KEY or GEMINI_API_KEY.")
+
+    if providers["openai"]:
+        openai_text = call_openai_text(prompt, system, model=OPENAI_MODEL_FAST)
+        routing_meta["openai_model"] = OPENAI_MODEL_FAST
+
+    if mode != "Lowest cost" and providers["gemini"]:
+        try:
+            gemini_text = call_gemini_text(prompt, system)
+            routing_meta["gemini_model"] = GEMINI_MODEL
+        except Exception as e:
+            routing_meta["errors"].append(f"Gemini: {e}")
+
+    final_text = openai_text or gemini_text
+
+    if mode == "Max accuracy" and providers["openai"] and providers["gemini"] and openai_text and gemini_text:
+        judge_prompt = (
+            "Choose the better final dog-walk recommendation based only on the ranked places and context. "
+            "Prefer the option that is more grounded in the candidate list and tradeoffs.\n\n"
+            f"Original planner input:\n{prompt}\n\n"
+            f"OpenAI summary:\n{openai_text}\n\n"
+            f"Gemini summary:\n{gemini_text}"
+        )
+        judge_text = call_openai_text(judge_prompt, judge_system, model=OPENAI_MODEL_STRONG)
+        final_text = judge_text
+        routing_meta["judge_model"] = OPENAI_MODEL_STRONG
+    elif mode == "Cost-aware balanced" and openai_text and gemini_text and disagreement_needed(openai_text, gemini_text):
+        judge_prompt = (
+            "Choose the better final dog-walk recommendation based only on the ranked places and context. "
+            "Keep the answer concise.\n\n"
+            f"Original planner input:\n{prompt}\n\n"
+            f"OpenAI summary:\n{openai_text}\n\n"
+            f"Gemini summary:\n{gemini_text}"
+        )
+        judge_text = call_openai_text(judge_prompt, judge_system, model=OPENAI_MODEL_FAST)
+        final_text = judge_text
+        routing_meta["judge_model"] = OPENAI_MODEL_FAST
+    elif not final_text and gemini_text:
+        final_text = gemini_text
+
+    st.session_state.openai_text = openai_text
+    st.session_state.gemini_text = gemini_text
+    st.session_state.judge_text = judge_text
+    st.session_state.routing_meta = routing_meta
+    return final_text
 
 # =========================================================
 # UI SECTIONS
@@ -518,8 +647,33 @@ def render_header():
     </div>
     """, unsafe_allow_html=True)
 
+
+def render_router_section():
+    st.markdown('<div class="section-label">1. Routing</div>', unsafe_allow_html=True)
+
+    st.session_state.analysis_mode = st.radio(
+        "Choose planning mode",
+        ["Lowest cost", "Cost-aware balanced", "Max accuracy"],
+        index=["Lowest cost", "Cost-aware balanced", "Max accuracy"].index(st.session_state.analysis_mode),
+        horizontal=True,
+    )
+
+    providers = available_providers()
+    c1, c2 = st.columns(2)
+    c1.metric("OpenAI", "Ready" if providers["openai"] else "Missing")
+    c2.metric("Gemini", "Ready" if providers["gemini"] else "Missing")
+
+    st.markdown("""
+    <div class="main-card">
+        <div class="small-note">
+            Lowest cost = one available model only. Cost-aware balanced = OpenAI first plus Gemini second opinion when available. Max accuracy = OpenAI and Gemini with OpenAI judging the better final summary.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def render_dog_profile():
-    st.markdown('<div class="section-label">1. Dog Profile</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">2. Dog Profile</div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -539,8 +693,9 @@ def render_dog_profile():
         index=["15 minutes", "30 minutes", "45 minutes", "60 minutes"].index(st.session_state.preferred_walk_length)
     )
 
+
 def render_location():
-    st.markdown('<div class="section-label">2. Location</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">3. Location</div>', unsafe_allow_html=True)
 
     st.markdown("""
     <div class="main-card">
@@ -565,6 +720,7 @@ def render_location():
                 st.session_state.location_error = ""
                 try:
                     st.session_state.location_name = reverse_geocode(lat, lon)
+                    reset_walk_outputs()
                 except Exception as e:
                     st.session_state.location_error = f"Reverse geocode error: {e}"
             else:
@@ -589,6 +745,7 @@ def render_location():
                     st.session_state.lon = result["lon"]
                     st.session_state.location_name = result["place_name"]
                     st.session_state.location_error = ""
+                    reset_walk_outputs()
                 else:
                     st.session_state.location_error = "Place not found."
             except Exception as e:
@@ -600,8 +757,9 @@ def render_location():
     if st.session_state.location_error:
         st.error(st.session_state.location_error)
 
+
 def render_walk_style():
-    st.markdown('<div class="section-label">3. Walk Style</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">4. Walk Style</div>', unsafe_allow_html=True)
 
     styles = [
         "Best Walk Now",
@@ -613,14 +771,18 @@ def render_walk_style():
         "Beach Walk"
     ]
 
-    st.session_state.walk_style = st.radio(
+    choice = st.radio(
         "Choose walk style",
         styles,
         index=styles.index(st.session_state.walk_style)
     )
+    if choice != st.session_state.walk_style:
+        st.session_state.walk_style = choice
+        reset_walk_outputs()
+
 
 def render_find_button():
-    st.markdown('<div class="section-label">4. Recommendation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">5. Recommendation</div>', unsafe_allow_html=True)
 
     if st.button("Find Best Walk", use_container_width=True):
         if st.session_state.lat is None or st.session_state.lon is None:
@@ -650,7 +812,7 @@ def render_find_button():
                 )
 
             st.session_state.tide_data = tide_data
-            st.session_state.recommendation = get_openai_recommendation(st.session_state.top_places, tide_data)
+            st.session_state.recommendation = get_walk_recommendation(st.session_state.top_places, tide_data)
 
             if tide_data:
                 st.session_state.backup_plan = (
@@ -664,18 +826,19 @@ def render_find_button():
         except Exception as e:
             st.error(f"Recommendation error: {e}")
 
+
 def render_result():
     if not st.session_state.recommendation:
         return
 
     best = st.session_state.selected_place
-    st.markdown('<div class="section-label">5. Result</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">6. Result</div>', unsafe_allow_html=True)
 
     st.markdown(f"""
     <div class="input-box">
         <div class="box-label">{display_name()}</div>
-        <div>Walk style: {st.session_state.walk_style}</div>
-        <div style="margin-top:0.45rem;">Current location: {st.session_state.location_name}</div>
+        <div>Walk style: {html.escape(st.session_state.walk_style)}</div>
+        <div style="margin-top:0.45rem;">Current location: {html.escape(st.session_state.location_name)}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -683,44 +846,46 @@ def render_result():
     if st.session_state.tide_data:
         tide_line = (
             f"<div style='margin-top:0.45rem;'><strong>Tide:</strong> "
-            f"{st.session_state.tide_data.get('height')} "
-            f"({st.session_state.tide_data.get('extreme_type')} at {st.session_state.tide_data.get('extreme_time')})</div>"
+            f"{html.escape(str(st.session_state.tide_data.get('height')))} "
+            f"({html.escape(str(st.session_state.tide_data.get('extreme_type')))} at {html.escape(str(st.session_state.tide_data.get('extreme_time')))})</div>"
         )
 
     st.markdown(f"""
     <div class="output-box">
         <div class="box-label">WAG</div>
-        <div><strong>Suggested place:</strong> {best['name']}</div>
+        <div><strong>Suggested place:</strong> {html.escape(best['name'])}</div>
         <div style="margin-top:0.45rem;"><strong>Distance:</strong> {best['distance_miles']} miles</div>
         <div style="margin-top:0.45rem;"><strong>Score:</strong> {best['score']}</div>
         {tide_line}
         <div style="margin-top:0.75rem;"><strong>Recommendation:</strong></div>
-        <div style="margin-top:0.45rem;">{st.session_state.recommendation}</div>
+        <div style="margin-top:0.45rem;">{html.escape(st.session_state.recommendation)}</div>
     </div>
     """, unsafe_allow_html=True)
+
 
 def render_top_options():
     if not st.session_state.top_places:
         return
 
-    st.markdown('<div class="section-label">6. Top Options</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">7. Top Options</div>', unsafe_allow_html=True)
 
     for i, place in enumerate(st.session_state.top_places, start=1):
         box_class = "output-box" if i == 1 else "alt-box"
         st.markdown(f"""
         <div class="{box_class}">
             <div class="box-label">Option {i}</div>
-            <div><strong>{place['name']}</strong></div>
+            <div><strong>{html.escape(place['name'])}</strong></div>
             <div style="margin-top:0.35rem;">Distance: {place['distance_miles']} miles</div>
             <div style="margin-top:0.35rem;">Score: {place['score']}</div>
         </div>
         """, unsafe_allow_html=True)
 
+
 def render_map():
     if not st.session_state.selected_place or st.session_state.lat is None:
         return
 
-    st.markdown('<div class="section-label">7. Map</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">8. Map</div>', unsafe_allow_html=True)
 
     df = pd.DataFrame([
         {"lat": st.session_state.lat, "lon": st.session_state.lon},
@@ -728,15 +893,17 @@ def render_map():
     ])
     st.map(df)
 
+
 def render_audio():
     if not st.session_state.audio_text:
         return
 
-    st.markdown('<div class="section-label">8. Optional Audio</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">9. Optional Audio</div>', unsafe_allow_html=True)
     audio_button(st.session_state.audio_text)
 
+
 def render_dev_tools():
-    st.markdown('<div class="section-label">9. Developer Tools</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">10. Developer Tools</div>', unsafe_allow_html=True)
 
     with st.expander("Open developer tools", expanded=False):
         st.write("Raw location result:")
@@ -754,6 +921,19 @@ def render_dev_tools():
         else:
             st.write("No ranked places yet.")
 
+        st.write("Routing meta:")
+        st.json(st.session_state.routing_meta)
+
+        if st.session_state.openai_text:
+            st.write("OpenAI summary:")
+            st.code(st.session_state.openai_text)
+        if st.session_state.gemini_text:
+            st.write("Gemini summary:")
+            st.code(st.session_state.gemini_text)
+        if st.session_state.judge_text:
+            st.write("Judge summary:")
+            st.code(st.session_state.judge_text)
+
 # =========================================================
 # MAIN
 # =========================================================
@@ -763,6 +943,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 render_header()
+render_router_section()
 render_dog_profile()
 render_location()
 render_walk_style()
