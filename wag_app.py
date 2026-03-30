@@ -6,7 +6,7 @@ from datetime import datetime
 import pandas as pd
 import requests
 import streamlit as st
-from streamlit_js_eval import streamlit_js_eval
+from streamlit_current_location import current_position
 
 # =========================================================
 # CONFIG
@@ -55,6 +55,7 @@ def init_state():
         "lat": None,
         "lon": None,
         "location_name": "",
+        "location_error": "",
         "walk_style": "Best Walk Now",
         "candidate_places": [],
         "top_places": [],
@@ -63,8 +64,6 @@ def init_state():
         "recommendation": "",
         "backup_plan": "",
         "audio_text": "",
-        "location_request_active": False,
-        "location_error": "",
         "raw_location_result": None,
     }
     for k, v in defaults.items():
@@ -232,40 +231,6 @@ def render_login():
 
         if st.session_state.login_error:
             st.error(st.session_state.login_error)
-
-# =========================================================
-# GEOLOCATION
-# =========================================================
-
-def get_phone_location():
-    return streamlit_js_eval(
-        js_expressions="""
-        await new Promise((resolve) => {
-            if (!navigator.geolocation) {
-                resolve({"error": "Geolocation is not supported on this device/browser."});
-                return;
-            }
-
-            navigator.geolocation.getCurrentPosition(
-                (position) => {
-                    resolve({
-                        "lat": position.coords.latitude,
-                        "lon": position.coords.longitude
-                    });
-                },
-                (error) => {
-                    resolve({"error": error.message});
-                },
-                {
-                    enableHighAccuracy: true,
-                    timeout: 15000,
-                    maximumAge: 0
-                }
-            );
-        })
-        """,
-        key="wag_location_request"
-    )
 
 # =========================================================
 # MAPBOX
@@ -563,39 +528,25 @@ def render_location():
     """, unsafe_allow_html=True)
 
     if st.button("Use My Location", use_container_width=True):
-        st.session_state.location_request_active = True
-        st.session_state.location_error = ""
-        st.session_state.raw_location_result = None
+        pos = current_position()
+        st.session_state.raw_location_result = pos
 
-    if st.session_state.location_request_active:
-        loc = get_phone_location()
+        if isinstance(pos, dict):
+            lat = pos.get("latitude")
+            lon = pos.get("longitude")
 
-        if isinstance(loc, dict):
-            st.session_state.raw_location_result = loc
-
-            if "lat" in loc and "lon" in loc:
-                st.session_state.lat = loc["lat"]
-                st.session_state.lon = loc["lon"]
-                st.session_state.location_request_active = False
-
+            if lat is not None and lon is not None:
+                st.session_state.lat = lat
+                st.session_state.lon = lon
+                st.session_state.location_error = ""
                 try:
-                    st.session_state.location_name = reverse_geocode(
-                        st.session_state.lat,
-                        st.session_state.lon
-                    )
+                    st.session_state.location_name = reverse_geocode(lat, lon)
                 except Exception as e:
-                    st.session_state.location_name = ""
                     st.session_state.location_error = f"Reverse geocode error: {e}"
-
-                st.rerun()
-
-            elif "error" in loc:
-                st.session_state.location_error = f"Location error: {loc['error']}"
-                st.session_state.location_request_active = False
-                st.rerun()
-
+            else:
+                st.session_state.location_error = "Location returned, but coordinates were missing."
         else:
-            st.info("Waiting for phone location...")
+            st.session_state.location_error = "No location returned. Tap again after allowing permission."
 
     if st.session_state.location_name:
         st.success(st.session_state.location_name)
@@ -743,7 +694,14 @@ def render_dev_tools():
 
     with st.expander("Open developer tools", expanded=False):
         st.write("Raw location result:")
-        st.json(st.session_state.raw_location_result)
+        raw_result = st.session_state.raw_location_result
+        if isinstance(raw_result, (dict, list)):
+            st.json(raw_result)
+        elif raw_result is None:
+            st.write("No location result yet.")
+        else:
+            st.code(str(raw_result))
+
         if st.session_state.top_places:
             st.write("Ranked places:")
             st.json(st.session_state.top_places)
