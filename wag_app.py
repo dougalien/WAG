@@ -63,6 +63,9 @@ def init_state():
         "recommendation": "",
         "backup_plan": "",
         "audio_text": "",
+        "location_request_active": False,
+        "location_error": "",
+        "raw_location_result": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -147,11 +150,6 @@ div[data-baseweb="select"] > div,
 div[data-baseweb="input"] > div,
 textarea, input {
     border-radius: 10px !important;
-}
-.walk-btn-row {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -242,26 +240,31 @@ def render_login():
 def get_phone_location():
     return streamlit_js_eval(
         js_expressions="""
-        new Promise((resolve) => {
+        await new Promise((resolve) => {
             if (!navigator.geolocation) {
                 resolve({"error": "Geolocation is not supported on this device/browser."});
-            } else {
-                navigator.geolocation.getCurrentPosition(
-                    (position) => resolve({
+                return;
+            }
+
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    resolve({
                         "lat": position.coords.latitude,
                         "lon": position.coords.longitude
-                    }),
-                    (error) => resolve({"error": error.message}),
-                    {
-                        enableHighAccuracy: true,
-                        timeout: 12000,
-                        maximumAge: 0
-                    }
-                );
-            }
+                    });
+                },
+                (error) => {
+                    resolve({"error": error.message});
+                },
+                {
+                    enableHighAccuracy: true,
+                    timeout: 15000,
+                    maximumAge: 0
+                }
+            );
         })
         """,
-        key="wag_location"
+        key="wag_location_request"
     )
 
 # =========================================================
@@ -381,10 +384,8 @@ def score_place(place, style):
     name = safe_lower(place["name"])
     score = 100
 
-    # Distance
     score -= place["distance_miles"] * 12
 
-    # Style fit
     if style == "Quick Walk":
         score -= place["distance_miles"] * 10
     if style == "Woods Walk":
@@ -414,7 +415,6 @@ def score_place(place, style):
         if any(k in name for k in ["park", "trail", "reservation", "conservation"]):
             score += 12
 
-    # Dog profile adjustments
     if st.session_state.crowd_sensitivity == "High":
         if any(k in name for k in ["common", "harbor", "downtown"]):
             score -= 10
@@ -554,23 +554,54 @@ def render_dog_profile():
 def render_location():
     st.markdown('<div class="section-label">2. Location</div>', unsafe_allow_html=True)
 
+    st.markdown("""
+    <div class="main-card">
+        <div class="small-note">
+            This app is designed for phone use. Tap below and allow location access.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     if st.button("Use My Location", use_container_width=True):
+        st.session_state.location_request_active = True
+        st.session_state.location_error = ""
+        st.session_state.raw_location_result = None
+
+    if st.session_state.location_request_active:
         loc = get_phone_location()
 
-        if isinstance(loc, dict) and "lat" in loc and "lon" in loc:
-            st.session_state.lat = loc["lat"]
-            st.session_state.lon = loc["lon"]
-            try:
-                st.session_state.location_name = reverse_geocode(st.session_state.lat, st.session_state.lon)
-            except Exception as e:
-                st.error(f"Reverse geocode error: {e}")
-        elif isinstance(loc, dict) and "error" in loc:
-            st.error(f"Location error: {loc['error']}")
+        if isinstance(loc, dict):
+            st.session_state.raw_location_result = loc
+
+            if "lat" in loc and "lon" in loc:
+                st.session_state.lat = loc["lat"]
+                st.session_state.lon = loc["lon"]
+                st.session_state.location_request_active = False
+
+                try:
+                    st.session_state.location_name = reverse_geocode(
+                        st.session_state.lat,
+                        st.session_state.lon
+                    )
+                except Exception as e:
+                    st.session_state.location_name = ""
+                    st.session_state.location_error = f"Reverse geocode error: {e}"
+
+                st.rerun()
+
+            elif "error" in loc:
+                st.session_state.location_error = f"Location error: {loc['error']}"
+                st.session_state.location_request_active = False
+                st.rerun()
+
         else:
-            st.warning("Location not returned yet. Tap again if needed.")
+            st.info("Waiting for phone location...")
 
     if st.session_state.location_name:
         st.success(st.session_state.location_name)
+
+    if st.session_state.location_error:
+        st.error(st.session_state.location_error)
 
 def render_walk_style():
     st.markdown('<div class="section-label">3. Walk Style</div>', unsafe_allow_html=True)
@@ -588,8 +619,7 @@ def render_walk_style():
     st.session_state.walk_style = st.radio(
         "Choose walk style",
         styles,
-        index=styles.index(st.session_state.walk_style),
-        horizontal=False
+        index=styles.index(st.session_state.walk_style)
     )
 
 def render_find_button():
@@ -712,6 +742,8 @@ def render_dev_tools():
     st.markdown('<div class="section-label">9. Developer Tools</div>', unsafe_allow_html=True)
 
     with st.expander("Open developer tools", expanded=False):
+        st.write("Raw location result:")
+        st.json(st.session_state.raw_location_result)
         if st.session_state.top_places:
             st.write("Ranked places:")
             st.json(st.session_state.top_places)
