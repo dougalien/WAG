@@ -167,23 +167,23 @@ def app():
     # ---------------------------
     st.header("1. Location")
 
-    col1, col2 = st.columns(2)
+if st.button("Use My Location"):
+    loc = get_geolocation()
 
-    with col1:
-        lat = st.text_input("Latitude")
-        lon = st.text_input("Longitude")
+    if loc and "lat" in loc:
+        st.session_state.lat = loc["lat"]
+        st.session_state.lon = loc["lon"]
 
-        if st.button("Set Location"):
-            st.session_state.lat = float(lat)
-            st.session_state.lon = float(lon)
-            st.session_state.location_name = reverse_geocode(
-                st.session_state.lat,
-                st.session_state.lon
-            )
+        st.session_state.location_name = reverse_geocode(
+            st.session_state.lat,
+            st.session_state.lon
+        )
 
-    with col2:
-        st.write("Current location:")
-        st.write(st.session_state.location_name)
+    elif loc and "error" in loc:
+        st.error(f"Location error: {loc['error']}")
+
+if st.session_state.location_name:
+    st.success(st.session_state.location_name)
 
     # ---------------------------
     # Walk Style
