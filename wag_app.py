@@ -545,7 +545,8 @@ def render_location():
     st.markdown("""
     <div class="main-card">
         <div class="small-note">
-            This app is designed for phone use. You can use phone location or enter a city and state.
+            This app works best with phone location or a street address.
+            You can use your phone's current location or enter a street address, city and state, or a place name.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -569,17 +570,17 @@ def render_location():
             else:
                 st.session_state.location_error = "Location returned, but coordinates were missing."
         else:
-            st.session_state.location_error = "No location returned. You can enter a city and state below."
+            st.session_state.location_error = "No location returned. You can enter an address below."
 
     st.session_state.manual_place = st.text_input(
-        "Or enter city and state",
+        "Or enter street address, city, and state",
         value=st.session_state.manual_place,
-        placeholder="Boston, MA"
+        placeholder="12 Maple St, Salem, MA"
     )
 
-    if st.button("Use Entered Place", use_container_width=True):
+    if st.button("Use Entered Address", use_container_width=True):
         if not st.session_state.manual_place.strip():
-            st.warning("Enter a city and state first.")
+            st.warning("Enter an address, city and state, or place name first.")
         else:
             try:
                 result = geocode_place(st.session_state.manual_place.strip())
@@ -594,7 +595,7 @@ def render_location():
                 st.session_state.location_error = f"Place lookup error: {e}"
 
     if st.session_state.location_name:
-        st.success(st.session_state.location_name)
+        st.success(f"Using location: {st.session_state.location_name}")
 
     if st.session_state.location_error:
         st.error(st.session_state.location_error)
