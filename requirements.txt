@@ -1,4 +1,4 @@
 streamlit
 requests
 pandas
-streamlit-js-eval
+streamlit-current-location
